@@ -1,0 +1,220 @@
+#include <SoftwareWire.h>
+#include <RtcDS3231.h>
+#include <Servo.h>
+
+// ---------- PINS ----------
+#define SDA_PIN 6
+#define SCL_PIN 7
+#define BUZZER 2
+#define BUTTON 12
+#define SERVO_PIN 9
+#define LCD_ADDR 0x27
+
+SoftwareWire myWire(SDA_PIN, SCL_PIN);
+RtcDS3231<SoftwareWire> Rtc(myWire);
+Servo myServo;
+
+// ---------- LCD ----------
+#define LCD_RS 0x01
+#define LCD_EN 0x04
+#define LCD_BL 0x08
+
+void lcdWritePCF(byte data) {
+  myWire.beginTransmission(LCD_ADDR);
+  myWire.write(data);
+  myWire.endTransmission();
+}
+
+void lcdPulseEnable(byte data) {
+  lcdWritePCF(data | LCD_EN);
+  delayMicroseconds(1);
+  lcdWritePCF(data & ~LCD_EN);
+  delayMicroseconds(50);
+}
+
+void lcdWrite4Bits(byte value, byte mode) {
+  byte data = (value & 0xF0) | mode | LCD_BL;
+  lcdWritePCF(data);
+  lcdPulseEnable(data);
+}
+
+void lcdSend(byte value, byte mode) {
+  lcdWrite4Bits(value & 0xF0, mode);
+  lcdWrite4Bits((value << 4) & 0xF0, mode);
+}
+
+void lcdCommand(byte command) {
+  lcdSend(command, 0);
+}
+
+void lcdPrintChar(char c) {
+  lcdSend(c, LCD_RS);
+}
+
+void lcdPrint(const char *text) {
+  while (*text) {
+    lcdPrintChar(*text++);
+  }
+}
+
+void lcdSetCursor(byte col, byte row) {
+  byte rowAddress[] = {0x00, 0x40};
+  lcdCommand(0x80 | (col + rowAddress[row]));
+}
+
+void lcdInit() {
+  delay(50);
+
+  lcdWrite4Bits(0x30, 0);
+  delay(5);
+  lcdWrite4Bits(0x30, 0);
+  delayMicroseconds(150);
+  lcdWrite4Bits(0x30, 0);
+  delayMicroseconds(150);
+
+  lcdWrite4Bits(0x20, 0);
+
+  lcdCommand(0x28);
+  lcdCommand(0x08);
+  lcdCommand(0x01);
+  delay(2);
+  lcdCommand(0x06);
+  lcdCommand(0x0C);
+}
+
+// ---------- VARIABLES ----------
+int servoPosition = 0;
+int pillsTaken = 0;
+bool lastButtonState = HIGH;
+
+// Prevent repeated automatic dispensing
+int lastDispenseHour = -1;
+int lastDispenseDay = -1;
+
+// ---------- DISPENSE FUNCTION ----------
+void dispensePill() {
+
+  // Beep
+  tone(BUZZER, 1000);
+  delay(200);
+  noTone(BUZZER);
+
+  // Move servo forward 45 degrees
+  servoPosition += 45;
+
+  // After 180°, return to 0°
+  if (servoPosition > 180) {
+    servoPosition = 0;
+  }
+
+  myServo.write(servoPosition);
+
+  pillsTaken++;
+
+  Serial.print("Pills Dispensed: ");
+  Serial.println(pillsTaken);
+}
+
+// ---------- CHECK AUTOMATIC TIME ----------
+void checkAutomaticDispense(RtcDateTime now) {
+
+  int hour = now.Hour();
+  int minute = now.Minute();
+  int day = now.Day();
+
+  bool medicineTime =
+      (hour == 6  && minute == 0) ||
+      (hour == 10 && minute == 0) ||
+      (hour == 14 && minute == 0) ||
+      (hour == 18 && minute == 0);
+
+  // Dispense only once at each scheduled time
+  if (medicineTime &&
+      !(lastDispenseHour == hour && lastDispenseDay == day)) {
+
+    Serial.println("AUTOMATIC DISPENSE!");
+
+    dispensePill();
+
+    lastDispenseHour = hour;
+    lastDispenseDay = day;
+  }
+}
+
+void setup() {
+  Serial.begin(9600);
+
+  pinMode(BUZZER, OUTPUT);
+  pinMode(BUTTON, INPUT_PULLUP);
+
+  myWire.begin();
+  Rtc.Begin();
+
+  lcdInit();
+
+  myServo.attach(SERVO_PIN);
+  myServo.write(0);
+
+  lcdSetCursor(0, 0);
+  lcdPrint("PILL DISPENSER");
+  lcdSetCursor(0, 1);
+  lcdPrint("SYSTEM READY");
+  delay(2000);
+}
+
+void loop() {
+
+  // ---------- GET RTC TIME ----------
+  RtcDateTime now = Rtc.GetDateTime();
+
+  char timeText[9];
+
+  sprintf(timeText, "%02u:%02u:%02u",
+          now.Hour(),
+          now.Minute(),
+          now.Second());
+
+  // ---------- DISPLAY TIME ----------
+  lcdSetCursor(0, 0);
+  lcdPrint("Time: ");
+  lcdPrint(timeText);
+  lcdPrint("   ");
+
+  // ---------- DISPLAY PILL COUNT ----------
+  lcdSetCursor(0, 1);
+
+  char pillText[17];
+  sprintf(pillText, "Pills Taken: %d", pillsTaken);
+  lcdPrint(pillText);
+
+  for (int i = strlen(pillText); i < 16; i++) {
+    lcdPrint(" ");
+  }
+
+  // ---------- AUTOMATIC DISPENSING ----------
+  checkAutomaticDispense(now);
+
+  // ---------- MANUAL BUTTON ----------
+  bool buttonState = digitalRead(BUTTON);
+
+  if (lastButtonState == HIGH && buttonState == LOW) {
+
+    delay(30); // Debounce
+
+    if (digitalRead(BUTTON) == LOW) {
+
+      Serial.println("MANUAL DISPENSE!");
+
+      dispensePill();
+
+      // Wait for button release
+      while (digitalRead(BUTTON) == LOW) {
+        delay(10);
+      }
+    }
+  }
+
+  lastButtonState = digitalRead(BUTTON);
+
+  delay(100);
+}
